@@ -1,0 +1,79 @@
+#include <MIDIUSB.h>
+
+#define NUM_ROWS 2
+#define NUM_COLS 2
+#define MIDI_CHANNEL 0  // Channel 1 = 0
+#define MIDI_NOTE_BASE 60  // Starting note (C4)
+
+const byte ROW_PINS[NUM_ROWS] = {4, 5};  // Row1=D4, Row2=D5
+const byte COL_PINS[NUM_COLS] = {2, 3};  // Col1=D2, Col2=D3
+
+bool keyState[NUM_ROWS * NUM_COLS] = {false};
+
+void setup() {
+  Serial.begin(115200);   // ✅ Serial monitor output for debugging
+  while (!Serial);        // Wait for serial connection (optional)
+  Serial.println("MIDI Matrix Ready 🎹");
+
+  // Setup row pins as inputs with pull-ups
+  for (byte r = 0; r < NUM_ROWS; r++) {
+    pinMode(ROW_PINS[r], INPUT_PULLUP);
+  }
+
+  // Setup column pins as outputs
+  for (byte c = 0; c < NUM_COLS; c++) {
+    pinMode(COL_PINS[c], OUTPUT);
+    digitalWrite(COL_PINS[c], HIGH);
+  }
+}
+
+void loop() {
+  scanMatrix();
+  delay(5);
+}
+
+// --- MATRIX SCANNING ---
+void scanMatrix() {
+  for (byte c = 0; c < NUM_COLS; c++) {
+    digitalWrite(COL_PINS[c], LOW); // Activate this column
+
+    for (byte r = 0; r < NUM_ROWS; r++) {
+      int keyID = getKeyID(r, c);
+      byte note = MIDI_NOTE_BASE + keyID;
+      bool pressed = (digitalRead(ROW_PINS[r]) == LOW); // Active LOW
+
+      if (pressed && !keyState[keyID]) {
+        keyState[keyID] = true;
+        sendNoteOn(note, 100, MIDI_CHANNEL);
+        Serial.print("Note ON  → ");
+        Serial.println(note);
+      } 
+      else if (!pressed && keyState[keyID]) {
+        keyState[keyID] = false;
+        sendNoteOff(note, 0, MIDI_CHANNEL);
+        Serial.print("Note OFF → ");
+        Serial.println(note);
+      }
+    }
+
+    digitalWrite(COL_PINS[c], HIGH); // Deactivate column
+  }
+}
+
+// --- MAP ROW/COL TO KEY INDEX ---
+int getKeyID(int row, int col) {
+  return (col * NUM_ROWS) + row;  // 0–3
+}
+
+// --- MIDI FUNCTIONS ---
+void sendNoteOn(byte pitch, byte velocity, byte channel) {
+  midiEventPacket_t noteOn = {0x09, 0x90 | channel, pitch, velocity};
+  MidiUSB.sendMIDI(noteOn);
+  MidiUSB.flush();
+}
+
+void sendNoteOff(byte pitch, byte velocity, byte channel) {
+  midiEventPacket_t noteOff = {0x08, 0x80 | channel, pitch, velocity};
+  MidiUSB.sendMIDI(noteOff);
+  MidiUSB.flush();
+}
