@@ -1,0 +1,40 @@
+/ {
+   aliases {
+       led0 = &led0;
+       sw1 = &button1;
+       sw2-drive = &switch2_driver;
+       sw2-sense = &switch2_pin2;
+   };
+
+    leds {
+        compatible = "gpio-leds";
+        led0: led_0 {
+            gpios = <&gpio0 28 GPIO_ACTIVE_LOW>;
+            label = "LED 1";
+        };
+    };
+
+    buttons {
+        compatible = "gpio-keys";
+        button1: button_1 {
+            gpios = <&gpio0 23 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+            label = "Button 1 (SW1)";
+        };
+    };
+
+    switches {
+        compatible = "gpio-keys";
+        switch2_pin2: switch2_pin2 {
+            gpios = <&gpio0 25 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+            label = "Button 2 (SW2) - Sense Pin (Input)";
+        };
+    };
+
+    switch_drivers {
+        compatible = "gpio-leds";
+        switch2_driver: switch2_driver {
+            gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
+            label = "Button 2 (SW2) - Drive Pin (Output)";
+        };
+    };
+};
