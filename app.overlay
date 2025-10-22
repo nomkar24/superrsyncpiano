@@ -1,40 +1,48 @@
 / {
    aliases {
-       led0 = &led0;
-       sw1 = &button1;
-       sw2-drive = &switch2_driver;
-       sw2-sense = &switch2_pin2;
+       ble-status-led = &ble_status_led;
+       sw0-led = &sw0_led;
+       sw1-led = &sw1_led;
+       matrix-col0 = &matrix_col0;
+       matrix-row0 = &matrix_row0;
+       matrix-row1 = &matrix_row1;
    };
 
     leds {
         compatible = "gpio-leds";
-        led0: led_0 {
+        
+        ble_status_led: ble_status_led {
             gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
-            label = "LED 1";
+            label = "BLE Status LED";
+        };
+        
+        sw0_led: sw0_led {
+            gpios = <&gpio0 29 GPIO_ACTIVE_HIGH>;
+            label = "Switch 0 LED";
+        };
+        
+        sw1_led: sw1_led {
+            gpios = <&gpio0 30 GPIO_ACTIVE_HIGH>;
+            label = "Switch 1 LED";
+        };
+        
+        matrix_col0: matrix_col0 {
+            gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
+            label = "Matrix Column 0 (Drive)";
         };
     };
 
-    buttons {
+    matrix_rows {
         compatible = "gpio-keys";
-        button1: button_1 {
-            gpios = <&gpio0 23 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
-            label = "Button 1 (SW1)";
+        
+        matrix_row0: matrix_row0 {
+            gpios = <&gpio0 24 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+            label = "Matrix Row 0 (Sense)";
         };
-    };
-
-    switches {
-        compatible = "gpio-keys";
-        switch2_pin2: switch2_pin2 {
-            gpios = <&gpio0 25 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
-            label = "Button 2 (SW2) - Sense Pin (Input)";
-        };
-    };
-
-    switch_drivers {
-        compatible = "gpio-leds";
-        switch2_driver: switch2_driver {
-            gpios = <&gpio0 24 GPIO_ACTIVE_HIGH>;
-            label = "Button 2 (SW2) - Drive Pin (Output)";
+        
+        matrix_row1: matrix_row1 {
+            gpios = <&gpio0 26 (GPIO_PULL_DOWN | GPIO_ACTIVE_HIGH)>;
+            label = "Matrix Row 1 (Sense)";
         };
     };
 };

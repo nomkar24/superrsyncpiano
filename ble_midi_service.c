@@ -21,6 +21,9 @@
 static struct bt_conn *current_conn = NULL;
 static bool notify_enabled = false;
 
+// BLE Status LED
+static const struct gpio_dt_spec *ble_status_led_ptr = NULL;
+
 // MIDI data buffer (for read operations - optional)
 static uint8_t midi_data_buf[20] = {0};
 static uint8_t midi_data_len = 0;
@@ -76,6 +79,11 @@ static void connected(struct bt_conn *conn, uint8_t err)
     } else {
         current_conn = bt_conn_ref(conn);
         printk("BLE MIDI Connected\n");
+        
+        // Turn on BLE status LED
+        if (ble_status_led_ptr && gpio_is_ready_dt(ble_status_led_ptr)) {
+            gpio_pin_set_dt(ble_status_led_ptr, 1);
+        }
     }
 }
 
@@ -89,6 +97,11 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
     
     notify_enabled = false;
+    
+    // Turn off BLE status LED
+    if (ble_status_led_ptr && gpio_is_ready_dt(ble_status_led_ptr)) {
+        gpio_pin_set_dt(ble_status_led_ptr, 0);
+    }
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -116,11 +129,14 @@ static const struct bt_data sd[] = {
 };
 
 // Initialize BLE MIDI
-int ble_midi_init(void)
+int ble_midi_init(const struct gpio_dt_spec *status_led)
 {
     int err;
 
     printk("Initializing BLE MIDI...\n");
+    
+    // Store status LED pointer
+    ble_status_led_ptr = status_led;
 
     // Enable Bluetooth
     err = bt_enable(NULL);

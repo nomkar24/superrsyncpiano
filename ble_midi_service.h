@@ -2,13 +2,15 @@
 #define BLE_MIDI_SERVICE_H
 
 #include <zephyr/types.h>
+#include <zephyr/drivers/gpio.h>
 
 /**
  * @brief Initialize BLE MIDI service and start advertising
  * 
+ * @param status_led Optional BLE status LED (NULL if not used)
  * @return 0 on success, negative error code on failure
  */
-int ble_midi_init(void);
+int ble_midi_init(const struct gpio_dt_spec *status_led);
 
 /**
  * @brief Send MIDI data over BLE
