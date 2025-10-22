@@ -2,6 +2,13 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/printk.h>
+#include "ble_midi_service.h"
+#include "midi_ble.h"
+
+// MIDI note assignments
+#define MIDI_NOTE_SW1  60  // Middle C (C4)
+#define MIDI_NOTE_SW2  62  // D4
+#define MIDI_CHANNEL   0   // MIDI Channel 1 (0-indexed)
 
 #define LED0_NODE DT_ALIAS(led0)
 #define SW1_NODE DT_ALIAS(sw1)
@@ -19,8 +26,7 @@ int main(void)
     int sw1_state, sw2_state;
     int prev_sw1_state = 1, prev_sw2_state = 0; // Previous states (start with released)
 
-    printk("Dual Switch LED Demo Started (Matrix Scanning Mode)\n");
-    printk("SW1: P0.23, SW2: P0.24 (drive) -> P0.25 (sense), LED: P0.28\n");
+    printk("Dual Switch LED Demo Started\n");
 
     // Check if LED device is ready
     if (!gpio_is_ready_dt(&led)) {
@@ -75,9 +81,14 @@ int main(void)
     // Set SW2 drive pin HIGH (matrix scanning: drive the column)
     gpio_pin_set_dt(&sw2_drive, 1);
 
-    printk("Setup complete! Monitoring switches...\n");
-    printk("Press SW1 or SW2 to control LED and see serial output\n");
-    printk("Matrix Scanning: P0.24 drives HIGH, P0.25 senses (ACTIVE_HIGH with PULL_DOWN)\n");
+    // Initialize BLE MIDI
+    ret = ble_midi_init();
+    if (ret) {
+        printk("BLE MIDI initialization failed (err %d)\n", ret);
+        return 0;
+    }
+
+    printk("Ready! Press switches to control LED\n");
 
     while (1) {
         // Read button states
@@ -91,29 +102,46 @@ int main(void)
 
         // Check for SW1 state change
         if (sw1_state != prev_sw1_state) {
+            uint8_t midi_packet[5];
+            int len;
+            
             if (sw1_state == 0) {
-                printk("SW1: PRESSED (ON)\n");
+                printk("SW1: ON - MIDI Note %d ON\n", MIDI_NOTE_SW1);
+                len = midi_ble_note_on(MIDI_NOTE_SW1, 100, MIDI_CHANNEL, 
+                                       midi_packet, sizeof(midi_packet));
             } else {
-                printk("SW1: RELEASED (OFF)\n");
+                printk("SW1: OFF - MIDI Note %d OFF\n", MIDI_NOTE_SW1);
+                len = midi_ble_note_off(MIDI_NOTE_SW1, 0, MIDI_CHANNEL,
+                                        midi_packet, sizeof(midi_packet));
             }
+            
+            if (len > 0) {
+                ble_midi_send(midi_packet, len);
+            }
+            
             prev_sw1_state = sw1_state;
         }
 
         // Check for SW2 state change
         if (sw2_state != prev_sw2_state) {
+            uint8_t midi_packet[5];
+            int len;
+            
             if (sw2_state == 1) {
-                printk("SW2: PRESSED (ON) - P0.24 driving P0.25 HIGH through switch\n");
+                printk("SW2: ON - MIDI Note %d ON\n", MIDI_NOTE_SW2);
+                len = midi_ble_note_on(MIDI_NOTE_SW2, 100, MIDI_CHANNEL,
+                                       midi_packet, sizeof(midi_packet));
             } else {
-                printk("SW2: RELEASED (OFF) - P0.25 pulled down (no connection)\n");
+                printk("SW2: OFF - MIDI Note %d OFF\n", MIDI_NOTE_SW2);
+                len = midi_ble_note_off(MIDI_NOTE_SW2, 0, MIDI_CHANNEL,
+                                        midi_packet, sizeof(midi_packet));
             }
+            
+            if (len > 0) {
+                ble_midi_send(midi_packet, len);
+            }
+            
             prev_sw2_state = sw2_state;
-        }
-
-        // Debug output for SW2 pin states
-        static int debug_counter = 0;
-        if (debug_counter++ % 100 == 0) { // Print every 1 second
-            printk("SW2 Matrix State - Drive (P0.24): HIGH, Sense (P0.25): %d, Switch: %s\n", 
-                   sw2_state, sw2_state ? "PRESSED" : "RELEASED");
         }
 
         // Control LED based on switch states

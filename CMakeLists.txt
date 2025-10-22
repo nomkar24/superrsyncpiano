@@ -7,4 +7,8 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(superr)
 
 # Add source files
-target_sources(app PRIVATE src/main.c)
+target_sources(app PRIVATE 
+    src/main.c
+    src/ble_midi_service.c
+    src/midi_ble.c
+)
