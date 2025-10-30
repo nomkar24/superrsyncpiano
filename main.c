@@ -4,11 +4,17 @@
 #include <zephyr/sys/printk.h>
 #include "ble_midi_service.h"
 #include "midi_ble.h"
+#include "ws2812_driver.h"  // Simple Zephyr WS2812B driver
+#include "color_utils.h"    // RGB/HSV utilities
 
 // MIDI note assignments - First octave starting from C4
 #define MIDI_NOTE_SW0  60  // C4 (Middle C) - First note of octave
-#define MIDI_NOTE_SW1  83  // C#4 / Db4 - Second note (last of our 2-key setup)
+#define MIDI_NOTE_SW1  83  // B5 - Second note
 #define MIDI_CHANNEL   0   // MIDI Channel 1 (0-indexed)
+
+// WS2812B LED mapping
+#define WS2812_LED_SW0  0  // LED index 0 for switch 0 (blue)
+#define WS2812_LED_SW1  1  // LED index 1 for switch 1 (green)
 
 // Device tree aliases
 #define BLE_STATUS_LED_NODE   DT_ALIAS(ble_status_led)
@@ -36,6 +42,7 @@ int main(void)
     printk("╔════════════════════════════════════╗\n");
     printk("║   Superr MIDI Controller v1.0     ║\n");
     printk("║   2x1 Matrix BLE MIDI Device      ║\n");
+    printk("║   + WS2812B LED Strip (24 LEDs)   ║\n");
     printk("╚════════════════════════════════════╝\n");
     printk("\n");
 
@@ -113,6 +120,13 @@ int main(void)
 
     printk("\n");
 
+        // ========== Initialize WS2812B LED Strip ==========
+        ret = ws2812_init();
+        if (ret) {
+            printk("ERROR: WS2812B initialization failed (err %d)\n", ret);
+            return 0;
+        }
+
     // ========== Initialize BLE MIDI ==========
     ret = ble_midi_init(&ble_status_led);
     if (ret) {
@@ -120,16 +134,27 @@ int main(void)
         return 0;
     }
 
-    printk("\n");
-    printk("╔════════════════════════════════════╗\n");
-    printk("║  MIDI Mapping:                    ║\n");
-    printk("║  SW0 (Row0) → C4  (Note 60)       ║\n");
-    printk("║  SW1 (Row1) → C#4 (Note 61)       ║\n");
-    printk("╚════════════════════════════════════╝\n");
-    printk("\n");
-    printk("Ready! Press switches to send MIDI notes.\n");
-    printk("BLE Status LED will glow when connected.\n");
-    printk("\n");
+        printk("\n");
+        printk("╔════════════════════════════════════╗\n");
+        printk("║  OPERATION MODE                   ║\n");
+        printk("╠════════════════════════════════════╣\n");
+        printk("║  MIDI Mapping:                    ║\n");
+        printk("║  SW0 (Row0) → Note 60  (C4)       ║\n");
+        printk("║  SW1 (Row1) → Note 83  (B5)       ║\n");
+        printk("║                                   ║\n");
+        printk("║  LED Strip Sync:                  ║\n");
+        printk("║  WS2812 LED 0 → SW0 (Blue)        ║\n");
+        printk("║  WS2812 LED 1 → SW1 (Green)       ║\n");
+        printk("║                                   ║\n");
+        printk("║  ⚠️  IMPORTANT:                    ║\n");
+        printk("║  LEDs work WITHOUT BLE!           ║\n");
+        printk("║  Just press switches to test      ║\n");
+        printk("╚════════════════════════════════════╝\n");
+        printk("\n");
+        printk("✅ System Ready!\n");
+        printk("→ Press SW0 or SW1 to control LEDs\n");
+        printk("→ Connect BLE for MIDI output (optional)\n");
+        printk("\n");
 
     // ========== Main Loop ==========
     while (1) {
@@ -145,15 +170,25 @@ int main(void)
             
             if (sw0_state == 1) {
                 // Switch pressed
-                printk("SW0: PRESSED → MIDI Note %d (C4) ON\n", MIDI_NOTE_SW0);
-                gpio_pin_set_dt(&sw0_led, 1);  // Turn on LED
+                printk("\n🔵 SW0: PRESSED → LED 0 BLUE + MIDI Note %d (C4) ON\n", MIDI_NOTE_SW0);
+                gpio_pin_set_dt(&sw0_led, 1);  // Turn on indicator LED
+                
+                    // Turn on WS2812 LED 0 (Blue) - BRIGHT
+                    ws2812_set_led(WS2812_LED_SW0, 0, 0, 255);  // Full blue
+                    ws2812_update();
+                    printk("   ✓ WS2812 LED 0 set to BLUE\n");
                 
                 len = midi_ble_note_on(MIDI_NOTE_SW0, 100, MIDI_CHANNEL, 
                                        midi_packet, sizeof(midi_packet));
             } else {
                 // Switch released
-                printk("SW0: RELEASED → MIDI Note %d (C4) OFF\n", MIDI_NOTE_SW0);
-                gpio_pin_set_dt(&sw0_led, 0);  // Turn off LED
+                printk("○  SW0: RELEASED → LED 0 OFF + MIDI Note %d (C4) OFF\n\n", MIDI_NOTE_SW0);
+                gpio_pin_set_dt(&sw0_led, 0);  // Turn off indicator LED
+                
+                    // Turn off WS2812 LED 0
+                    ws2812_led_off(WS2812_LED_SW0);
+                    ws2812_update();
+                    printk("   ✓ WS2812 LED 0 turned OFF\n");
                 
                 len = midi_ble_note_off(MIDI_NOTE_SW0, 0, MIDI_CHANNEL,
                                         midi_packet, sizeof(midi_packet));
@@ -173,15 +208,25 @@ int main(void)
             
             if (sw1_state == 1) {
                 // Switch pressed
-                printk("SW1: PRESSED → MIDI Note %d (C#4) ON\n", MIDI_NOTE_SW1);
-                gpio_pin_set_dt(&sw1_led, 1);  // Turn on LED
+                printk("\n🟢 SW1: PRESSED → LED 1 GREEN + MIDI Note %d (B5) ON\n", MIDI_NOTE_SW1);
+                gpio_pin_set_dt(&sw1_led, 1);  // Turn on indicator LED
+                
+                    // Turn on WS2812 LED 1 (Green) - BRIGHT
+                    ws2812_set_led(WS2812_LED_SW1, 0, 255, 0);  // Full green
+                    ws2812_update();
+                    printk("   ✓ WS2812 LED 1 set to GREEN\n");
                 
                 len = midi_ble_note_on(MIDI_NOTE_SW1, 100, MIDI_CHANNEL,
                                        midi_packet, sizeof(midi_packet));
             } else {
                 // Switch released
-                printk("SW1: RELEASED → MIDI Note %d (C#4) OFF\n", MIDI_NOTE_SW1);
-                gpio_pin_set_dt(&sw1_led, 0);  // Turn off LED
+                printk("○  SW1: RELEASED → LED 1 OFF + MIDI Note %d (B5) OFF\n\n", MIDI_NOTE_SW1);
+                gpio_pin_set_dt(&sw1_led, 0);  // Turn off indicator LED
+                
+                    // Turn off WS2812 LED 1
+                    ws2812_led_off(WS2812_LED_SW1);
+                    ws2812_update();
+                    printk("   ✓ WS2812 LED 1 turned OFF\n");
                 
                 len = midi_ble_note_off(MIDI_NOTE_SW1, 0, MIDI_CHANNEL,
                                         midi_packet, sizeof(midi_packet));

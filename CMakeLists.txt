@@ -11,4 +11,6 @@ target_sources(app PRIVATE
     src/main.c
     src/ble_midi_service.c
     src/midi_ble.c
+    src/ws2812_driver.c         # Simple WS2812B driver
+    src/color_utils.c           # Color conversion utilities
 )
