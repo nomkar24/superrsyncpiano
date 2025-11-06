@@ -6,11 +6,9 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 # Set the project name
 project(superr)
 
-# Add source files
+# Add source files (only what's actually used)
 target_sources(app PRIVATE 
     src/main.c
     src/ble_midi_service.c
     src/midi_ble.c
-    src/ws2812_driver.c         # Simple WS2812B driver
-    src/color_utils.c           # Color conversion utilities
 )
