@@ -1,0 +1,36 @@
+description: Custom binding for WS2812 SPI driver with bits-per-symbol support
+
+compatible: "custom,ws2812-spi"
+
+include: spi-device.yaml
+
+properties:
+  chain-length:
+    type: int
+    required: true
+    description: Number of LEDs in the chain
+
+  spi-one-frame:
+    type: int
+    required: true
+    description: SPI frame to represent a 1 bit
+
+  spi-zero-frame:
+    type: int
+    required: true
+    description: SPI frame to represent a 0 bit
+
+  color-mapping:
+    type: array
+    required: true
+    description: Color mapping (e.g. RGB, GRB)
+
+  reset-delay:
+    type: int
+    required: false
+    description: Reset delay in microseconds
+
+  bits-per-symbol:
+    type: int
+    required: false
+    description: Number of SPI bits per WS2812 symbol

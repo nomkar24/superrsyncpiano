@@ -1,0 +1,68 @@
+#include <zephyr/dt-bindings/led/led.h>
+/ {
+    aliases {
+        ble-status-led = &ble_status_led;
+        led-strip = &led_strip;
+    };
+
+    leds {
+        compatible = "gpio-leds";
+        
+        ble_status_led: ble_status_led {
+            gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
+            label = "BLE Status LED";
+        };
+    };
+};
+
+/* Configure SPI1 for WS2812B LED Strip */
+&spi1 {
+    compatible = "nordic,nrf-spim";
+    status = "okay";
+    pinctrl-0 = <&spi1_default>;
+    pinctrl-1 = <&spi1_sleep>;
+    pinctrl-names = "default", "sleep";
+
+    led_strip: ws2812@0 {
+        compatible = "custom,ws2812-spi";
+        reg = <0>; /* SPI chip select 0 */
+        spi-max-frequency = <8000000>; /* WS2812B needs ~8MHz for 8-bit symbols */
+
+        /* WS2812B timing requirements */
+        color-mapping = <LED_COLOR_ID_GREEN
+                         LED_COLOR_ID_RED
+                         LED_COLOR_ID_BLUE>;
+        chain-length = <24>; /* 24 Keys */
+        spi-one-frame = <0xF8>;  /* 5 bits H (625ns), 3 bits L (375ns) at 8MHz */
+        spi-zero-frame = <0xE0>; /* 3 bits H (375ns), 5 bits L (625ns) at 8MHz */
+        reset-delay = <300>;
+        
+        label = "WS2812B_STRIP";
+    };
+};
+
+/* Pin Configuration for SPI1 (MOSI on P0.27, Dummy SCK on P0.31) */
+&pinctrl {
+    spi1_default: spi1_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_MOSI, 0, 27)>,
+                    <NRF_PSEL(SPIM_SCK, 0, 31)>; /* Dummy SCK */
+            bias-pull-down;
+        };
+    };
+
+    spi1_sleep: spi1_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_MOSI, 0, 27)>,
+                    <NRF_PSEL(SPIM_SCK, 0, 31)>;
+            low-power-enable;
+            bias-pull-down;
+        };
+    };
+};
+
+// Disable GPIO forwarder to free up P1 pins
+&gpio_fwd {
+    status = "disabled";
+};
+
