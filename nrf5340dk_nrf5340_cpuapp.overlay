@@ -1,7 +1,8 @@
 / {
-   aliases {
-       ble-status-led = &ble_status_led;
-   };
+    aliases {
+        ble-status-led = &ble_status_led;
+        led-strip = &led_strip;
+    };
 
     leds {
         compatible = "gpio-leds";
@@ -9,6 +10,48 @@
         ble_status_led: ble_status_led {
             gpios = <&gpio0 28 GPIO_ACTIVE_HIGH>;
             label = "BLE Status LED";
+        };
+    };
+};
+
+/* Configure SPI1 for WS2812B LED Strip */
+&spi1 {
+    compatible = "nordic,nrf-spim";
+    status = "okay";
+    pinctrl-0 = <&spi1_default>;
+    pinctrl-1 = <&spi1_sleep>;
+    pinctrl-names = "default", "sleep";
+
+    led_strip: ws2812@0 {
+        compatible = "worldsemi,ws2812-spi";
+        reg = <0>; /* SPI chip select 0 */
+        spi-max-frequency = <4000000>; /* WS2812B needs 4MHz SPI */
+
+        /* WS2812B timing requirements */
+        frame-format = <32768>; /* SPI_FRAME_FORMAT_TI_SSP_MICROWIRE */
+        color-mapping = <LED_COLOR_ID_GREEN
+                         LED_COLOR_ID_RED
+                         LED_COLOR_ID_BLUE>;
+        chain-length = <24>; /* 24 Keys */
+        spi-one-frame = <0x70>;
+        spi-zero-frame = <0x40>;
+        
+        label = "WS2812B_STRIP";
+    };
+};
+
+/* Pin Configuration for SPI1 (MOSI on P0.05) */
+&pinctrl {
+    spi1_default: spi1_default {
+        group1 {
+            psels = <NRF_PSEL(SPIM_MOSI, 0, 5)>; /* P0.05 */
+        };
+    };
+
+    spi1_sleep: spi1_sleep {
+        group1 {
+            psels = <NRF_PSEL(SPIM_MOSI, 0, 5)>;
+            low-power-enable;
         };
     };
 };

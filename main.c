@@ -4,6 +4,7 @@
 #include <zephyr/sys/printk.h>
 #include "ble_midi_service.h"
 #include "midi_ble.h"
+#include <zephyr/drivers/led_strip.h>
 
 // ========== 24-KEY CONFIGURATION ==========
 #define NUM_COLS 4    // 4 columns (all active)
@@ -65,8 +66,19 @@ static struct gpio_dt_spec cols[NUM_COLS];           // 4 columns
 static struct gpio_dt_spec matrix1_rows[NUM_ROWS];   // 6 rows for Matrix 1
 static struct gpio_dt_spec matrix2_rows[NUM_ROWS];   // 6 rows for Matrix 2
 static struct gpio_dt_spec test_pin;                 // Test pin for 3.3V detection
-static const struct gpio_dt_spec ble_status_led = GPIO_DT_SPEC_GET(DT_ALIAS(ble_status_led), gpios);
+static struct gpio_dt_spec ble_status_led = GPIO_DT_SPEC_GET(DT_ALIAS(ble_status_led), gpios);
 static key_state_t keys[NUM_KEYS];                   // 24 keys
+
+// ========== LED STRIP CONFIGURATION ==========
+#define STRIP_NODE DT_ALIAS(led_strip)
+#define SUB_STRIP_NUM_PIXELS 24
+
+static const struct device *const strip = DEVICE_DT_GET(STRIP_NODE);
+static struct led_rgb pixels[SUB_STRIP_NUM_PIXELS];
+
+// LED Colors (R, G, B) - scaled down for brightness safety
+static const struct led_rgb color_on = { .r = 0, .g = 10, .b = 30 }; // Cyan/Blueish
+static const struct led_rgb color_off = { .r = 0, .g = 0, .b = 0 };  // Off
 
 // ========== GPIO INITIALIZATION ==========
 static int init_gpio(void)
@@ -342,6 +354,12 @@ static void scan_matrix(void)
                     
                     printk("[NOTE ON] Key[R%d,C%d]: Note %d, Velocity %d (time=%ums)\n",
                            row + 1, col + 1, midi_note, key->velocity, time_diff);
+
+                    // LED ON
+                    if (key_idx < SUB_STRIP_NUM_PIXELS) {
+                        memcpy(&pixels[key_idx], &color_on, sizeof(struct led_rgb));
+                        led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+                    }
                 } else if (!key->matrix1_active) {
                     printk("[WARN] Key[R%d,C%d]: M2 contact but M1 not active!\n", 
                            row + 1, col + 1);
@@ -373,6 +391,13 @@ static void scan_matrix(void)
             key->note_playing = false;
             int row = i / NUM_COLS;
             int col = i % NUM_COLS;
+
+            // LED OFF
+            if (i < SUB_STRIP_NUM_PIXELS) {
+                memcpy(&pixels[i], &color_off, sizeof(struct led_rgb));
+                led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+            }
+
             printk("[NOTE OFF] Key[R%d,C%d]: Note %d\n", row + 1, col + 1, midi_note);
         }
     }
@@ -469,6 +494,15 @@ int main(void)
     if (ret) {
         printk("\n[ERROR] GPIO initialization failed!\n");
         return 0;
+    }
+
+    // ========== Initialize LED Strip ==========
+    if (device_is_ready(strip)) {
+        printk("[OK] Found LED strip device %s\n", strip->name);
+        memset(pixels, 0, sizeof(pixels)); // Clear all LEDs
+        led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+    } else {
+        printk("[ERROR] LED strip device not ready!\n");
     }
 
     // ========== Initialize BLE MIDI ==========
