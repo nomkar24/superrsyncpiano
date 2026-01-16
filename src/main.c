@@ -5,6 +5,42 @@
 #include "ble_midi_service.h"
 #include "midi_ble.h"
 #include <zephyr/drivers/led_strip.h>
+#include <math.h>
+#include <zephyr/drivers/led_strip.h>
+#include <math.h>
+#include <math.h>
+#include <math.h>
+#include <zephyr/drivers/watchdog.h>
+#include <soc.h>
+#include <hal/nrf_regulators.h>
+#include "ble_config_service.h"
+
+// ========== RTOS CONFIGURATION ==========
+#define SCAN_STACK_SIZE 1024
+#define SCAN_PRIORITY   1
+#define LED_STACK_SIZE  2048
+#define LED_PRIORITY    5
+
+K_THREAD_STACK_DEFINE(scan_stack, SCAN_STACK_SIZE);
+K_THREAD_STACK_DEFINE(led_stack, LED_STACK_SIZE);
+
+struct k_thread scan_thread_data;
+struct k_thread led_thread_data;
+
+// ========== WATCHDOG GLOBALS ==========
+static const struct device *wdt;
+static int wdt_chan_scan;
+static int wdt_chan_led;
+
+// Event Queue for communicating Key Presses to LED Thread
+struct led_event {
+    uint8_t key_index;
+    uint8_t velocity;
+    bool is_on;
+};
+
+// Queue can hold 50 events (buffer for rapid playing)
+K_MSGQ_DEFINE(led_msgq, sizeof(struct led_event), 50, 4);
 
 // ========== 24-KEY CONFIGURATION ==========
 #define NUM_COLS 4    // 4 columns (all active)
@@ -17,19 +53,19 @@
 // Current flow when key pressed: Column (pull-up HIGH) → Switch → Diode → Row (scanning LOW)
 // LOGIC: Rows OUTPUT (default HIGH, scan LOW), Columns INPUT (pull-up, read LOW when pressed)
 
-// COLUMNS (INPUT with PULL-UP) - Use P1 (GPIO1) pins to avoid conflicts
-#define COL1_PIN  0   // P1.00
-#define COL2_PIN  1   // P1.01
-#define COL3_PIN  2   // P1.02
-#define COL4_PIN  3   // P1.03
+// COLUMNS (INPUT with PULL-UP) - Moved to P0 (Safe Analog Inputs)
+#define COL1_PIN  4   // P0.04 (AIN0)
+#define COL2_PIN  5   // P0.05 (AIN1)
+#define COL3_PIN  6   // P0.06 (AIN2)
+#define COL4_PIN  7   // P0.07 (AIN3)
 
-// MATRIX 1 ROWS (OUTPUT) - Use P1 pins
-#define M1_ROW1_PIN  4   // P1.04
-#define M1_ROW2_PIN  5   // P1.05
-#define M1_ROW3_PIN  6   // P1.06
-#define M1_ROW4_PIN  7   // P1.07
-#define M1_ROW5_PIN  8   // P1.08
-#define M1_ROW6_PIN  9   // P1.09
+// MATRIX 1 ROWS (OUTPUT) - Moved to P0 (Safe GPIOs & NFC pins)
+#define M1_ROW1_PIN  25  // P0.25 (Safe)
+#define M1_ROW2_PIN  26  // P0.26 (Safe)
+#define M1_ROW3_PIN  2   // P0.02 (NFC1 -> GPIO)
+#define M1_ROW4_PIN  3   // P0.03 (NFC2 -> GPIO)
+#define M1_ROW5_PIN  10  // P0.10 (Safe)
+#define M1_ROW6_PIN  11  // P0.11 (Safe)
 
 // MATRIX 2 ROWS (OUTPUT) - Use P1 pins
 #define M2_ROWa_PIN  10  // P1.10
@@ -39,8 +75,7 @@
 #define M2_ROWe_PIN  14  // P1.14
 #define M2_ROWf_PIN  15  // P1.15
 
-// TEST PIN - Use free P0 pin
-#define TEST_PIN  4  // P0.04 (moved from P0.27)
+
 
 // ========== MIDI CONFIGURATION ==========
 #define MIDI_CHANNEL 0         // MIDI Channel 1 (0-indexed)
@@ -59,26 +94,35 @@ typedef struct {
     uint32_t matrix1_time;    // Timestamp of first contact (milliseconds)
     uint32_t matrix2_time;    // Timestamp of second contact (milliseconds)
     uint8_t velocity;         // Calculated MIDI velocity
+    uint32_t m1_latch_timer;  // Debounce latch
+    uint32_t m2_latch_timer;  // Debounce latch M2
 } key_state_t;
 
 // ========== GLOBAL VARIABLES ==========
 static struct gpio_dt_spec cols[NUM_COLS];           // 4 columns
 static struct gpio_dt_spec matrix1_rows[NUM_ROWS];   // 6 rows for Matrix 1
 static struct gpio_dt_spec matrix2_rows[NUM_ROWS];   // 6 rows for Matrix 2
-static struct gpio_dt_spec test_pin;                 // Test pin for 3.3V detection
+
 static struct gpio_dt_spec ble_status_led = GPIO_DT_SPEC_GET(DT_ALIAS(ble_status_led), gpios);
 static key_state_t keys[NUM_KEYS];                   // 24 keys
 
+// ========== POWER MANAGEMENT ==========
+static int64_t last_activity_time = 0;
+#define SLEEP_TIMEOUT_MS  (5 * 60 * 1000) // 5 Minutes
+#define DIM_TIMEOUT_MS    (1 * 60 * 1000) // 1 Minute
+
 // ========== LED STRIP CONFIGURATION ==========
 #define STRIP_NODE DT_ALIAS(led_strip)
-#define SUB_STRIP_NUM_PIXELS 24
+#define SUB_STRIP_NUM_PIXELS 25
 
 static const struct device *const strip = DEVICE_DT_GET(STRIP_NODE);
-static struct led_rgb pixels[SUB_STRIP_NUM_PIXELS];
+// VISUAL ENGINE STATE
+static struct led_rgb pixels[SUB_STRIP_NUM_PIXELS];         // Current Displayed Color
+static struct led_rgb target_pixels[SUB_STRIP_NUM_PIXELS];  // Target Color (Smoothing)
 
 // LED Colors (R, G, B) - scaled down for brightness safety
-static const struct led_rgb color_on = { .r = 0, .g = 10, .b = 30 }; // Cyan/Blueish
-static const struct led_rgb color_off = { .r = 0, .g = 0, .b = 0 };  // Off
+// static const struct led_rgb color_on = { .r = 255, .g = 0, .b = 0 }; // Red
+// static const struct led_rgb color_off = { .r = 0, .g = 0, .b = 0 };  // Off
 
 // ========== GPIO INITIALIZATION ==========
 static int init_gpio(void)
@@ -105,49 +149,37 @@ static int init_gpio(void)
     printk("[COLUMNS] INPUT with PULL-UP - Standard keyboard matrix:\n");
     const uint8_t col_pins[] = {COL1_PIN, COL2_PIN, COL3_PIN, COL4_PIN};
     for (int i = 0; i < NUM_COLS; i++) {
-        cols[i].port = gpio1;  // Using GPIO1 port
+        cols[i].port = gpio0;  // MOVED TO GPIO0
         cols[i].pin = col_pins[i];
         cols[i].dt_flags = GPIO_ACTIVE_HIGH;
         
-        ret = gpio_pin_configure(gpio1, col_pins[i], GPIO_INPUT | GPIO_PULL_UP);
+        ret = gpio_pin_configure(gpio0, col_pins[i], GPIO_INPUT | GPIO_PULL_UP);
         if (ret < 0) {
-            printk("[ERROR] Failed to configure Column %d (P1.%02d)\n", i + 1, col_pins[i]);
+            printk("[ERROR] Failed to configure Column %d (P0.%02d)\n", i + 1, col_pins[i]);
             return ret;
         }
-        printk("[OK] Column %d: P1.%02d (INPUT with pull-up, default HIGH)\n", i + 1, col_pins[i]);
+        printk("[OK] Column %d: P0.%02d (INPUT with pull-up, default HIGH)\n", i + 1, col_pins[i]);
     }
     
-    // ===== Initialize TEST PIN (for 3.3V detection) =====
-    printk("\n[TEST PIN] For 3.3V detection:\n");
-    test_pin.port = gpio0;
-    test_pin.pin = TEST_PIN;
-    test_pin.dt_flags = GPIO_ACTIVE_HIGH;
-    
-    ret = gpio_pin_configure(gpio0, TEST_PIN, GPIO_INPUT | GPIO_PULL_DOWN);
-    if (ret < 0) {
-        printk("[ERROR] Failed to configure Test Pin (P0.%02d)\n", TEST_PIN);
-        return ret;
-    }
-    printk("[OK] Test Pin: P0.%02d (INPUT with pull-down)\n", TEST_PIN);
-    printk("     Touch to 3.3V to test - should show HIGH\n");
+
     
     // ===== Initialize MATRIX 1 row pins (OUTPUT - Drive for scanning) =====
     printk("\n[MATRIX 1 ROWS] OUTPUT - Scanned LOW one at a time:\n");
     const uint8_t m1_row_pins[] = {M1_ROW1_PIN, M1_ROW2_PIN, M1_ROW3_PIN, 
                                      M1_ROW4_PIN, M1_ROW5_PIN, M1_ROW6_PIN};
     for (int i = 0; i < NUM_ROWS; i++) {
-        matrix1_rows[i].port = gpio1;  // Using GPIO1 port
+        matrix1_rows[i].port = gpio0;  // MOVED TO GPIO0
         matrix1_rows[i].pin = m1_row_pins[i];
         matrix1_rows[i].dt_flags = GPIO_ACTIVE_HIGH;
         
-        ret = gpio_pin_configure(gpio1, m1_row_pins[i], GPIO_OUTPUT);
+        ret = gpio_pin_configure(gpio0, m1_row_pins[i], GPIO_OUTPUT);
         if (ret < 0) {
-            printk("[ERROR] Failed to configure Matrix 1 Row %d (P1.%02d)\n", i + 1, m1_row_pins[i]);
+            printk("[ERROR] Failed to configure Matrix 1 Row %d (P0.%02d)\n", i + 1, m1_row_pins[i]);
             return ret;
         }
         // Set row HIGH by default (not scanning)
         gpio_pin_set_dt(&matrix1_rows[i], 1);
-        printk("[OK] Matrix 1, Row %d: P1.%02d (OUTPUT -> set HIGH)\n", i + 1, m1_row_pins[i]);
+        printk("[OK] Matrix 1, Row %d: P0.%02d (OUTPUT -> set HIGH)\n", i + 1, m1_row_pins[i]);
     }
     
     // ===== Initialize MATRIX 2 row pins (OUTPUT - Drive for scanning) =====
@@ -180,7 +212,7 @@ static int init_gpio(void)
     printk("   Columns (should be HIGH):\n");
     for (int i = 0; i < NUM_COLS; i++) {
         int col_state = gpio_pin_get_dt(&cols[i]);
-        printk("     Col %d P1.%02d: %s\n", i + 1, cols[i].pin, 
+        printk("     Col %d P0.%02d: %s\n", i + 1, cols[i].pin, 
                col_state ? "HIGH [OK]" : "LOW [ERROR]");
     }
     
@@ -188,7 +220,7 @@ static int init_gpio(void)
     for (int i = 0; i < NUM_ROWS; i++) {
         int m1_state = gpio_pin_get_dt(&matrix1_rows[i]);
         int m2_state = gpio_pin_get_dt(&matrix2_rows[i]);
-        printk("     Row %d: M1=P1.%02d %s, M2=P1.%02d %s\n", 
+        printk("     Row %d: M1=P0.%02d %s, M2=P1.%02d %s\n", 
                i + 1, 
                matrix1_rows[i].pin, m1_state ? "HIGH [OK]" : "LOW [ERROR]",
                matrix2_rows[i].pin, m2_state ? "HIGH [OK]" : "LOW [ERROR]");
@@ -196,7 +228,7 @@ static int init_gpio(void)
     printk("\n");
     
     // ===== GPIO TEST: Blink Row 1 to verify GPIO is working =====
-    printk("[TEST] Blinking Matrix 1 Row 1 (P1.04) 5 times...\n");
+    printk("[TEST] Blinking Matrix 1 Row 1 (P0.25) 5 times...\n");
     printk("   Use multimeter to verify pin toggles HIGH/LOW\n");
     for (int i = 0; i < 5; i++) {
         gpio_pin_set_dt(&matrix1_rows[0], 0);  // Set LOW
@@ -212,27 +244,73 @@ static int init_gpio(void)
     return 0;
 }
 
-// ========== VELOCITY CALCULATION ==========
-static uint8_t calculate_velocity(uint32_t time_diff_ms)
-{
-    if (time_diff_ms == 0) {
-        return MAX_VELOCITY;  // Instantaneous = maximum velocity
+// ========== POWER MANAGEMENT HELPER ==========
+void enter_deep_sleep(void) {
+    printk("[POWER] Entering Deep Sleep (System OFF)...\n");
+    
+    // 1. Turn off LEDs (Black)
+    memset(pixels, 0, sizeof(pixels));
+    led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+    k_busy_wait(100); // Wait for data to send
+
+    // 2. Configure Wake-Up Source (Any Key Press)
+    // To wake up, we need a HIGH -> LOW transition (or just LOW level).
+    // Mechanics:
+    // - Drive ALL Rows LOW.
+    // - Configure ALL Columns as INPUT with Pull-Up and SENSE_LOW interrupt.
+    // - When key pressed, Col connects to Low Row -> Col goes Low -> Wake Up.
+    
+    // Set all Rows to Output LOW
+    for (int i=0; i<NUM_ROWS; i++) {
+        gpio_pin_configure_dt(&matrix1_rows[i], GPIO_OUTPUT_INACTIVE); // Low
+        gpio_pin_configure_dt(&matrix2_rows[i], GPIO_OUTPUT_INACTIVE); // Low
     }
     
-    if (time_diff_ms > MAX_VELOCITY_TIME_MS) {
-        return MIN_VELOCITY;  // Too slow = minimum velocity
+    // Configure Columns as Interrupts
+    for (int i=0; i<NUM_COLS; i++) {
+        gpio_pin_interrupt_configure_dt(&cols[i], GPIO_INT_LEVEL_LOW);
     }
     
-    // Linear mapping: faster press = higher velocity
-    // velocity = MAX - (time_diff * range / MAX_TIME)
-    uint8_t velocity = MAX_VELOCITY - 
-        ((time_diff_ms * (MAX_VELOCITY - MIN_VELOCITY)) / MAX_VELOCITY_TIME_MS);
+    // 3. Goodbye
+    printk("[POWER] Goodnight. Press any key to wake.\n");
+    k_sleep(K_MSEC(100)); // Compose output
     
-    // Clamp to valid MIDI velocity range
-    if (velocity < MIN_VELOCITY) velocity = MIN_VELOCITY;
-    if (velocity > MAX_VELOCITY) velocity = MAX_VELOCITY;
+    // Force System OFF (Deep Sleep) - Manual Register Write
+    // nRF5340 Application Core
+    #if defined(NRF_REGULATORS)
+        nrf_regulators_system_off(NRF_REGULATORS);
+    #elif defined(NRF_REGULATORS_NS)
+        nrf_regulators_system_off(NRF_REGULATORS_NS);
+    #else
+        // Fallback for older headers
+        NRF_REGULATORS_S->SYSTEMOFF = 1;
+    #endif
     
-    return velocity;
+    // Safety barrier
+    while(1) { __WFE(); }
+}
+
+// Calculate velocity from time difference (inverse relationship)
+static uint8_t calculate_velocity(uint32_t time_diff_ms) {
+    if (time_diff_ms == 0) return MAX_VELOCITY;
+    if (time_diff_ms > MAX_VELOCITY_TIME_MS) return MIN_VELOCITY;
+    
+    // Linear interpolation
+    // Fast (small time) -> High Velocity
+    // Slow (large time) -> Low Velocity
+    uint8_t raw_vel = MAX_VELOCITY - ((time_diff_ms * (MAX_VELOCITY - MIN_VELOCITY)) / MAX_VELOCITY_TIME_MS);
+
+    // Apply Sensitivity Scaling (Global Setting)
+    // g_sensitivity: 50 = 1.0x (Normal)
+    // 100 = 2.0x (Super Sensitive)
+    // 0 = 0.0x (Off)
+    float scale = (float)g_sensitivity / 50.0f;
+    int scaled_vel = (int)((float)raw_vel * scale);
+    
+    if (scaled_vel > 127) scaled_vel = 127;
+    if (scaled_vel < 0) scaled_vel = 0;
+    
+    return (uint8_t)scaled_vel;
 }
 
 // ========== FORCE RESET ALL KEYS (Debug Helper) ==========
@@ -262,7 +340,170 @@ static void force_reset_all_keys(void)
 // - Rows are OUTPUT (default HIGH, scan by setting LOW one at a time)
 // - Columns are INPUT with PULL-UP (default HIGH)
 // - When key pressed and row is LOW: Column reads LOW (pulled down through switch and diode)
-#if 0
+
+// Helper: Apply brightness to color
+
+
+// Helper: Map Velocity (0-127) to Thermal Color Gradient (Blue -> Purple -> Red)
+static struct led_rgb get_velocity_color(uint8_t velocity) {
+    struct led_rgb color = {0};
+    
+    // Clamp velocity
+    if (velocity < MIN_VELOCITY) velocity = MIN_VELOCITY;
+    if (velocity > MAX_VELOCITY) velocity = MAX_VELOCITY;
+    
+    // Normalize to 0.0 - 1.0 range based on min/max
+    float t = (float)(velocity - MIN_VELOCITY) / (float)(MAX_VELOCITY - MIN_VELOCITY);
+    
+    // THEME 0: AURORA (Blue -> Purple -> Pink)
+    if (g_led_theme == 0) {
+        color.r = (uint8_t)(t * 255.0f);
+        color.b = (uint8_t)((1.0f - t) * 255.0f);
+        if (t > 0.8f) color.g = (uint8_t)((t - 0.8f) * 150.0f); // Hot Pop
+    }
+    // THEME 1: FIRE (Red -> Orange -> White)
+    else if (g_led_theme == 1) {
+        color.r = 255;
+        color.g = (uint8_t)(t * 200.0f); // Add Green to make Orange/Yellow
+        color.b = (uint8_t)(t > 0.8f ? (t - 0.8f) * 255.0f : 0); // White hot tip
+    }
+    // THEME 2: MATRIX (Dim Green -> Bright Green -> White)
+    else {
+        color.r = (uint8_t)(t > 0.9f ? (t - 0.9f) * 2550.0f : 0); // Flash white at max (clamped)
+        color.g = (uint8_t)(50 + t * 205.0f);
+        color.b = 0;
+    }
+    
+    return color;
+}
+
+// Helper: Linear Interpolation for Smooth Fades
+static uint8_t lerp_uint8(uint8_t current, uint8_t target, float factor) {
+    if (current == target) return current;
+    float diff = (float)target - (float)current;
+    
+    // Snap if very close
+    if (diff > -1.0f && diff < 1.0f) return target;
+    
+    return (uint8_t)(current + diff * factor);
+}
+
+// RTOS: LED Thread (Handles Animation & Events)
+void led_thread_entry(void *p1, void *p2, void *p3) {
+    printk("[RTOS] LED Thread Started\n");
+    
+    // 1. Run Startup Animation
+    printk("[Start] Running Premium Aurora Effect...\n");
+    int steps = 1500; // 15 seconds
+    
+    for (int t = 0; t < steps; t++) {
+        float time_val = (float)t * 0.05f;
+        for (int i = 0; i < SUB_STRIP_NUM_PIXELS; i++) {
+            float pos_val = (float)i * 0.3f;
+            float wave1 = 0.5f + 0.5f * sinf(time_val + pos_val);
+            float wave2 = 0.5f + 0.5f * sinf(time_val * 0.7f - pos_val);
+            float wave3 = 0.5f + 0.5f * sinf(time_val * 1.3f + pos_val);
+            
+            int r = (int)(wave1 * 60.0f);
+            int g = (int)(wave2 * 40.0f);
+            int b = (int)(wave3 * 80.0f + 20.0f); 
+
+            float brightness = 1.0f;
+            if (t < 200) brightness = (float)t / 200.0f;
+            if (t > steps - 200) brightness = (float)(steps - t) / 200.0f;
+
+            pixels[i].r = (uint8_t)(r * brightness);
+            pixels[i].g = (uint8_t)(g * brightness);
+            pixels[i].b = (uint8_t)(b * brightness);
+        }
+        led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+        
+        // Feed Watchdog during long animation
+        if (wdt) wdt_feed(wdt, wdt_chan_led);
+        
+        k_msleep(10);
+    }
+    
+    // Clear Strip
+    memset(pixels, 0, sizeof(pixels));
+    memset(target_pixels, 0, sizeof(target_pixels));
+    led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+    printk("[App] Ready. Entering LED Loop.\n");
+
+    // 2. Main LED Loop (60 FPS Game Loop)
+    struct led_event evt;
+    bool led_is_off = false;
+    
+    while(1) {
+        // A. Input Phase (Drain Queue)
+        // Check for new notes (non-blocking)
+        while (k_msgq_get(&led_msgq, &evt, K_NO_WAIT) == 0) {
+            led_is_off = false; // Wake up on event
+            int led_idx = evt.key_index + 1; // +1 for sacrificial
+            
+            if (led_idx < SUB_STRIP_NUM_PIXELS) {
+                if (evt.is_on) {
+                     // Set TARGET to the new color
+                     target_pixels[led_idx] = get_velocity_color(evt.velocity);
+                } else {
+                     // Set TARGET to Black (OFF)
+                     memset(&target_pixels[led_idx], 0, sizeof(struct led_rgb));
+                }
+            }
+        }
+        
+        // B. Update Phase (Smoothing / Physics)
+        bool needs_update = false;
+        
+        // Only run physics if not in "Dim Mode"
+        if (!led_is_off) {
+            float smooth_factor = 0.25f; // Adjust for speed (0.1=Slow, 0.5=Fast)
+            
+            for (int i=0; i<SUB_STRIP_NUM_PIXELS; i++) {
+                struct led_rgb *curr = &pixels[i];
+                struct led_rgb *targ = &target_pixels[i];
+                
+                // Interpolate R, G, B
+                uint8_t new_r = lerp_uint8(curr->r, targ->r, smooth_factor);
+                uint8_t new_g = lerp_uint8(curr->g, targ->g, smooth_factor);
+                uint8_t new_b = lerp_uint8(curr->b, targ->b, smooth_factor);
+                
+                // Check if changed
+                if (new_r != curr->r || new_g != curr->g || new_b != curr->b) {
+                    curr->r = new_r;
+                    curr->g = new_g;
+                    curr->b = new_b;
+                    needs_update = true;
+                }
+            }
+            
+            // C. Render Phase
+            if (needs_update) {
+                led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+            }
+        }
+        
+        // D. Housekeeping
+        // Feed Watchdog (Every 1s at least) - Logic simplified for loop
+        if (wdt) {
+             wdt_feed(wdt, wdt_chan_led);
+        }
+        
+        // Check Dim Mode (turn off LEDs if idle for 1 minute)
+        if (!led_is_off && (k_uptime_get() - last_activity_time > DIM_TIMEOUT_MS)) {
+             printk("[POWER] Auto-Dim: Turning off LEDs\n");
+             memset(pixels, 0, sizeof(pixels));
+             memset(target_pixels, 0, sizeof(target_pixels)); // Ensure target also off
+             led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+             led_is_off = true;
+        }
+        
+        // E. Frame Limiter (60 FPS = ~16ms)
+        k_msleep(16);
+    }
+}
+
+// #if 0
 static void scan_matrix(void)
 {
     static uint32_t debug_counter = 0;
@@ -278,33 +519,49 @@ static void scan_matrix(void)
         // ===== SCAN MATRIX 1 (First Contact) =====
         // Set current Matrix 1 row LOW (active scan)
         gpio_pin_set_dt(&matrix1_rows[row], 0);
-        k_busy_wait(100);  // Increased delay to make scanning visible with multimeter
-        
+        k_busy_wait(100);  // Increased to 100us for better signal settling
+
         // Debug: Show we're scanning (every 1000 scans = ~5 seconds)
-        if (debug_counter % 1000 == 0 && row == 0) {
-            printk("[SCAN] Scanning active (Row set LOW, should read columns)\n");
-        }
+        // if (debug_counter % 1000 == 0 && row == 0) {
+        //    printk("[SCAN] Scanning active (Row set LOW, should read columns)\n");
+        // }
         
         // Read all columns for Matrix 1
         for (int col = 0; col < NUM_COLS; col++) {
             int key_idx = row * NUM_COLS + col;
             key_state_t *key = &keys[key_idx];
-            uint8_t midi_note = BASE_MIDI_NOTE + key_idx;
+            // uint8_t midi_note = BASE_MIDI_NOTE + key_idx; // Removed unused var
             
             // Read column: LOW = key pressed (pulled down through switch and diode to LOW row)
             int col_state = gpio_pin_get_dt(&cols[col]);
             bool m1_pressed = (col_state == 0);  // LOW = pressed
             
-            // ===== Handle Matrix 1 (First Contact) =====
+            // Activity Detected?
+            if (m1_pressed) {
+               last_activity_time = k_uptime_get();
+            }
+
+            // ===== Handle            // First contact made
             if (m1_pressed && !key->matrix1_active) {
-                // First contact made
                 key->matrix1_active = true;
                 key->matrix1_time = current_time;
-                printk("\n[M1] Key[R%d,C%d]: Matrix 1 FIRST contact (Note %d)\n", 
-                       row + 1, col + 1, midi_note);
+                key->m1_latch_timer = current_time; // Start latch timer
+                // printk dropped for performance
             } else if (!m1_pressed && key->matrix1_active) {
-                // First contact released
-                key->matrix1_active = false;
+                // First contact released - SMART DEBOUNCE
+                // CASE A: Note NOT playing yet? We are in the "Press" phase.
+                //    - User might be pressing slowly, or switch is bouncing.
+                //    - We MUST hold M1 active for a long window (250ms) to wait for M2.
+                //    - This preserves the "Start Time" so we can get TRUE VELOCITY.
+                // CASE B: Note IS playing? We are in the "Release" phase.
+                //    - User is letting go. We want snappy release.
+                //    - Use short debounce (50ms) just to filter noise.
+                
+                uint32_t hold_time = key->note_playing ? 50 : 250;
+
+                if (k_uptime_get_32() - key->m1_latch_timer > hold_time && !key->matrix2_active) {
+                     key->matrix1_active = false;
+                }
             }
         }
         
@@ -312,12 +569,12 @@ static void scan_matrix(void)
         gpio_pin_set_dt(&matrix1_rows[row], 1);
         
         // Add settling time between Matrix 1 and Matrix 2 scans to prevent interference
-        k_busy_wait(50);
+        k_busy_wait(50); // Safe guard delay between matrix scans
         
         // ===== SCAN MATRIX 2 (Second Contact) =====
         // Set current Matrix 2 row LOW (active scan)
         gpio_pin_set_dt(&matrix2_rows[row], 0);
-        k_busy_wait(150);  // Longer delay for Matrix 2 to ensure stable reading
+        k_busy_wait(100);  // Increased to 100us for better signal settling
         
         // Read all columns for Matrix 2
         for (int col = 0; col < NUM_COLS; col++) {
@@ -334,40 +591,45 @@ static void scan_matrix(void)
                 // Second contact made
                 key->matrix2_active = true;
                 key->matrix2_time = current_time;
+                key->m2_latch_timer = current_time; // Start latch
                 
-                printk("[M2] Key[R%d,C%d]: Matrix 2 SECOND contact detected (Note %d)\n", 
+                printk("[M2] Key[R%d,C%d]: Matrix 2 SECOND contact detected (Note %d)\n",  
                        row + 1, col + 1, midi_note);
                 
                 // Calculate velocity and send Note ON
                 if (key->matrix1_active && !key->note_playing) {
                     uint32_t time_diff = key->matrix2_time - key->matrix1_time;
                     key->velocity = calculate_velocity(time_diff);
-                    
                     // Send MIDI Note ON
+                    // Re-calculate note with current transpose (in case it changed mid-press)
+                    uint8_t midi_note = BASE_MIDI_NOTE + key_idx + g_transpose;
+                    
                     uint8_t midi_packet[5];
-                    int len = midi_ble_note_on(midi_note, key->velocity, MIDI_CHANNEL,
+                    int len = midi_ble_note_on(midi_note, key->velocity, MIDI_CHANNEL, 
                                               midi_packet, sizeof(midi_packet));
                     if (len > 0) {
                         ble_midi_send(midi_packet, len);
                     }
-                    
+
                     key->note_playing = true;
                     
-                    printk("[NOTE ON] Key[R%d,C%d]: Note %d, Velocity %d (time=%ums)\n",
-                           row + 1, col + 1, midi_note, key->velocity, time_diff);
-
-                    // LED ON
-                    if (key_idx < SUB_STRIP_NUM_PIXELS) {
-                        memcpy(&pixels[key_idx], &color_on, sizeof(struct led_rgb));
-                        led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
-                    }
+                    // Send Event to LED Thread
+                    struct led_event e = {
+                        .key_index = key_idx,
+                        .velocity = key->velocity,
+                        .is_on = true
+                    };
+                    k_msgq_put(&led_msgq, &e, K_NO_WAIT);
+                    
                 } else if (!key->matrix1_active) {
                     printk("[WARN] Key[R%d,C%d]: M2 contact but M1 not active!\n", 
                            row + 1, col + 1);
                 }
             } else if (!m2_pressed && key->matrix2_active) {
-                // Second contact released
-                key->matrix2_active = false;
+                // Second contact released - DEBOUNCE
+                if (k_uptime_get_32() - key->m2_latch_timer > 50) {
+                     key->matrix2_active = false;
+                }
             }
         }
         
@@ -381,9 +643,9 @@ static void scan_matrix(void)
         key_state_t *key = &keys[i];
         if (!key->matrix1_active && !key->matrix2_active && key->note_playing) {
             // Both contacts released, send Note OFF
-            uint8_t midi_note = BASE_MIDI_NOTE + i;
+            uint8_t midi_note = BASE_MIDI_NOTE + i + g_transpose;
             uint8_t midi_packet[5];
-            int len = midi_ble_note_off(midi_note, 0, MIDI_CHANNEL,
+            int len = midi_ble_note_off(midi_note, 0, MIDI_CHANNEL, 
                                        midi_packet, sizeof(midi_packet));
             if (len > 0) {
                 ble_midi_send(midi_packet, len);
@@ -392,30 +654,22 @@ static void scan_matrix(void)
             key->note_playing = false;
             int row = i / NUM_COLS;
             int col = i % NUM_COLS;
+            
+            // Send Event to LED Thread
+            struct led_event e = {
+                .key_index = i,
+                .velocity = 0,
+                .is_on = false
+            };
+            k_msgq_put(&led_msgq, &e, K_NO_WAIT);
 
-            // LED OFF
-            if (i < SUB_STRIP_NUM_PIXELS) {
-                memcpy(&pixels[i], &color_off, sizeof(struct led_rgb));
-                led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
-            }
-
-            printk("[NOTE OFF] Key[R%d,C%d]: Note %d\n", row + 1, col + 1, midi_note);
+            printk("[NOTE OFF] Key[R%d,C%d]\n", row + 1, col + 1);
         }
     }
     
     // Debug output every 200 scans (~1 time per second at 200Hz)
     if (debug_counter++ % 200 == 0) {
-        // Check test pin status
-        static int last_test_state = -1;
-        int test_state = gpio_pin_get_dt(&test_pin);
-        if (test_state != last_test_state) {
-            if (test_state) {
-                printk("[TEST PIN] P0.28: HIGH [OK] (Connected to 3.3V)\n");
-            } else {
-                printk("[TEST PIN] P0.28: LOW (Pull-down active)\n");
-            }
-            last_test_state = test_state;
-        }
+
         
         int active_keys = 0;
         for (int i = 0; i < NUM_KEYS; i++) {
@@ -461,7 +715,37 @@ static void scan_matrix(void)
     }
 }
 
+
+
+
+
+void scan_thread_entry(void *p1, void *p2, void *p3) {
+    printk("[RTOS] Scan Thread Started\n");
+    last_activity_time = k_uptime_get(); // Init timer
+    
+    int loop_count = 0;
+    while (1) {
+        scan_matrix();
+        
+        // Power Management Check
+        int64_t now = k_uptime_get();
+        if ((now - last_activity_time) > SLEEP_TIMEOUT_MS) {
+            enter_deep_sleep();
+        }
+
+        k_usleep(100); // Sleep 100us (0.1ms) to release CPU to lower priority threads (LEDs)
+
+        // Feed Watchdog every 1000 loops (~1 sec)
+        if (++loop_count >= 1000) {
+            if (wdt) wdt_feed(wdt, wdt_chan_scan);
+            loop_count = 0;
+        }
+    }
+}
+// #endif
+
 // ========== LED TEST PATTERN ==========
+#if 0
 static void test_led_pattern(void)
 {
     printk("[TEST] Running LED startup sequence (R -> G -> B)...\n");
@@ -497,6 +781,10 @@ static void test_led_pattern(void)
     printk("[TEST] LED sequence complete\n");
 }
 #endif
+// #endif
+// #endif
+
+// #endif
 
 // ========== MAIN FUNCTION ==========
 int main(void)
@@ -537,8 +825,9 @@ int main(void)
     // ========== Initialize LED Strip ==========
     if (device_is_ready(strip)) {
         printk("[OK] Found LED strip device %s\n", strip->name);
-        // memset(pixels, 0, sizeof(pixels)); // Clear all LEDs
-        // led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+        memset(pixels, 0, sizeof(pixels)); // Force clear all LEDs
+        led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
+        printk("[OK] Cleared LED strip to OFF\n");
     } else {
         printk("[ERROR] LED strip device not ready!\n");
     }
@@ -557,6 +846,41 @@ int main(void)
         printk("[ERROR] BLE MIDI initialization failed (err %d)\n", ret);
         return 0;
     }
+    
+    // ========== Initialize Config Service ==========
+    ret = ble_config_init();
+    if (ret) {
+        printk("[WARN] BLE Config initialization failed\n");
+    }
+
+    // ========== Initialize Watchdog ==========
+    wdt = DEVICE_DT_GET(DT_ALIAS(watchdog0));
+    if (!device_is_ready(wdt)) {
+        printk("[CRITICAL] Watchdog not ready! System unsafe.\n");
+        return 0; // Don't run without safety
+    }
+
+    struct wdt_timeout_cfg wdt_config = {
+        .window.min = 0,
+        .window.max = 5000, // 5 seconds max before reset
+        .callback = NULL,   // No callback, just reset
+        .flags = WDT_FLAG_RESET_SOC,
+    };
+
+    wdt_chan_scan = wdt_install_timeout(wdt, &wdt_config);
+    wdt_chan_led = wdt_install_timeout(wdt, &wdt_config);
+    
+    if (wdt_chan_scan < 0 || wdt_chan_led < 0) {
+        printk("[ERROR] Failed to install WDT timeouts\n");
+        return 0;
+    }
+
+    ret = wdt_setup(wdt, WDT_OPT_PAUSE_HALTED_BY_DBG);
+    if (ret < 0) {
+        printk("[ERROR] WDT setup failed\n");
+        return 0;
+    }
+    printk("[OK] Watchdog Armed! (5s timeout)\n");
 
     printk("\n");
     printk("==============================================\n");
@@ -590,14 +914,22 @@ int main(void)
     printk("[TEST] Touch P0.27 to 3.3V to test connectivity\n");
     printk("[SCAN] Scanning 24 keys for velocity sensitivity\n\n");
     
-    // ========== Main Scanning Loop ==========
+    // ========== Start RTOS Threads ==========
+    k_thread_create(&scan_thread_data, scan_stack,
+                    K_THREAD_STACK_SIZEOF(scan_stack),
+                    scan_thread_entry, NULL, NULL, NULL,
+                    SCAN_PRIORITY, 0, K_NO_WAIT);
+                    
+    k_thread_create(&led_thread_data, led_stack,
+                    K_THREAD_STACK_SIZEOF(led_stack),
+                    led_thread_entry, NULL, NULL, NULL,
+                    LED_PRIORITY, 0, K_NO_WAIT);
+
+
+
+    // Main thread becomes idle or handles BLE management
     while (1) {
-        for (int pos = 0; pos < SUB_STRIP_NUM_PIXELS; pos++) {
-            memset(pixels, 0, sizeof(pixels));
-            pixels[pos].g = 255;   // bright green dot
-            led_strip_update_rgb(strip, pixels, SUB_STRIP_NUM_PIXELS);
-            k_sleep(K_MSEC(100));
-        }
+        k_msleep(10000);
     }
 
     return 0;

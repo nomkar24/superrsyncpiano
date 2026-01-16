@@ -3,6 +3,7 @@
     aliases {
         ble-status-led = &ble_status_led;
         led-strip = &led_strip;
+        watchdog0 = &wdt0;
     };
 
     leds {
@@ -13,6 +14,9 @@
             label = "BLE Status LED";
         };
     };
+    
+    
+    /* Touch Sensor Removed */
 };
 
 /* Configure SPI1 for WS2812B LED Strip */
@@ -32,7 +36,7 @@
         color-mapping = <LED_COLOR_ID_GREEN
                          LED_COLOR_ID_RED
                          LED_COLOR_ID_BLUE>;
-        chain-length = <24>; /* 24 Keys */
+        chain-length = <25>; /* 25 LEDs (1 Sacrificial + 24 Keys) */
         spi-one-frame = <0xF8>;  /* 5 bits H (625ns), 3 bits L (375ns) at 8MHz */
         spi-zero-frame = <0xE0>; /* 3 bits H (375ns), 5 bits L (625ns) at 8MHz */
         reset-delay = <300>;

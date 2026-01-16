@@ -11,5 +11,6 @@ target_sources(app PRIVATE
     src/main.c
     src/ble_midi_service.c
     src/midi_ble.c
+    src/ble_config_service.c
     src/ws2812_spi.c
 )
